@@ -2,7 +2,7 @@ name: API Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, cinema ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -54,14 +54,9 @@ jobs:
       - name: Run API tests
         working-directory: tests/postman
         run: |
-
-          docker compose up -d
-          # Wait for services to be ready
-          echo "Waiting for services to be ready..."
-          sleep 15
           # Build the Docker image
           docker build -t cinemaabyss-api-tests .
-          
+
           # Run the tests in Docker
           docker run --network=cinemaabyss-network -v "$(pwd)/reports:/app/reports" cinemaabyss-api-tests
         

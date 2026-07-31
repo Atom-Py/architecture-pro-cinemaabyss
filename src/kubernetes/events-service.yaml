@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: events-service
+  namespace: cinemaabyss
+  labels:
+    app: events-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: events-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: events-service
+    spec:
+      containers:
+      - name: events-service
+        image: ghcr.io/atom-py/architecture-pro-cinemaabyss/events-service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PORT
+          value: "8082"
+        envFrom:
+        - configMapRef:
+            name: cinemaabyss-config
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        # The service answers only after it connects to Kafka, and the broker
+        # needs time to elect a leader. startupProbe gives it up to 150 seconds
+        # before the liveness probe starts killing the pod.
+        startupProbe:
+          httpGet:
+            path: /api/events/health
+            port: 8082
+          periodSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /api/events/health
+            port: 8082
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /api/events/health
+            port: 8082
+          periodSeconds: 20
+      restartPolicy: Always
+      imagePullSecrets:
+        - name: dockerconfigjson
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: events-service
+  namespace: cinemaabyss
+spec:
+  selector:
+    app: events-service
+  ports:
+  - port: 8082
+    targetPort: 8082
+  type: ClusterIP
