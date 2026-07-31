@@ -1,0 +1,44 @@
+@startuml task1-c4-dynamic-strangler
+!include <C4/C4_Dynamic>
+
+title Динамическая диаграмма - запрос каталога фильмов через Strangler Fig
+
+Person(viewer, "Пользователь", "Открывает каталог фильмов.")
+
+Container(istio_gw, "Istio Ingress Gateway", "Envoy", "Терминация TLS, mTLS внутри кластера.")
+Container(api_gw, "API Gateway (proxy-service)", "Python 3.14, Robyn", "Единая точка вызова, решает, куда отправить запрос.")
+Container(movies, "Movies Service", "Go", "Выделенный сервис метаданных.")
+ContainerDb(movies_db, "БД фильмов", "PostgreSQL", "Фильмы, жанры, рейтинги.")
+Container(monolith, "Монолит «Кинобездна»", "Go", "Прежняя реализация того же эндпоинта.")
+ContainerDb(monolith_db, "БД монолита", "PostgreSQL", "Единая схема.")
+ContainerQueue(kafka, "Шина событий", "Apache Kafka", "Топик movie-events.")
+Container(rec_adapter, "Recommendation Adapter", "Go", "Отдаёт события во внешнюю рекомендательную систему.")
+
+Rel(viewer, istio_gw, "GET /api/movies", "HTTPS")
+Rel(istio_gw, api_gw, "Проксирует запрос", "HTTP, mTLS")
+
+note right of api_gw
+  Решение принимается на каждый запрос:
+  GRADUAL_MIGRATION = false - весь трафик в монолит,
+  это переключатель мгновенного отката.
+  GRADUAL_MIGRATION = true - в новый сервис
+  уходит MOVIES_MIGRATION_PERCENT процентов запросов.
+end note
+
+Rel(api_gw, movies, "Вариант А: запрос попал в долю нового сервиса", "REST")
+Rel(movies, movies_db, "Читает каталог", "SQL")
+Rel(movies, api_gw, "Список фильмов", "JSON")
+
+setIndex(3)
+Rel(api_gw, monolith, "Вариант Б: запрос остался на монолите", "REST")
+Rel(monolith, monolith_db, "Читает каталог", "SQL")
+Rel(monolith, api_gw, "Тот же список фильмов", "JSON")
+
+setIndex(6)
+Rel(api_gw, viewer, "200 OK, ответ не зависит от выбранного бэкенда", "JSON")
+
+Rel(movies, kafka, "Публикует movie-events о просмотре", "Kafka")
+Rel(kafka, rec_adapter, "Доставляет событие", "Kafka")
+
+SHOW_LEGEND()
+@enduml
