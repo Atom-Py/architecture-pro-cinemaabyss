@@ -1,0 +1,11 @@
+[project]
+name = "events-service"
+version = "1.0.0"
+description = "CinemaAbyss event service, Kafka producer and consumer MVP"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "aiokafka>=0.14.0",
+    "msgspec>=0.21.1",
+    "pydantic-settings>=2.14.2",
+    "robyn>=0.88.0",
+]
