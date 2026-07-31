@@ -247,6 +247,37 @@ jobs:
 Как только сборка отработает и в github registry появятся ваши образы, можно переходить к блоку настройки Kubernetes
 Успешным результатом данного шага является "зеленая" сборка и "зеленые" тесты
 
+### Решение по CI/CD
+
+Вместо четырёх пар почти одинаковых шагов сборка вынесена в матрицу - новый сервис добавляется одной строкой, а все четыре образа собираются параллельно:
+
+```yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: monolith
+            context: ./src/monolith
+          - name: movies-service
+            context: ./src/microservices/movies
+          - name: events-service
+            context: ./src/microservices/events
+          - name: proxy-service
+            context: ./src/microservices/proxy
+```
+
+Помимо этого в `docker-build-push.yml` и `api-tests.yml` внесено следующее:
+
+- Ветка `cinema` добавлена в триггеры обоих workflow, иначе на пуш в неё ничего не запускается.
+- Версии actions подняты до `checkout@v4`, `setup-buildx-action@v3`, `login-action@v3`, `metadata-action@v5`, `build-push-action@v6`. Шаблонные v2 и v3 работают на устаревшей версии Node.
+- Тег `latest` задан как `type=raw,value=latest`. В `metadata-action@v5` строка `latest` в списке тегов невалидна, а сам тег нужен, потому что на него ссылаются манифесты Kubernetes.
+- Кеш сборки разведён по сервисам через `scope=${{ matrix.name }}`, иначе параллельные сборки перетирают кеш друг друга.
+- Из шага запуска тестов в `api-tests.yml` убран повторный `docker compose up -d`: стек уже поднят предыдущим шагом.
+
+Имя образа GHCR требует в нижнем регистре, в workflow регистр приводит сам `metadata-action`, а в манифестах он прописан вручную.
+
+В GitHub Actions зелёные все три workflow: сборка образов, API Tests на пуш в `cinema` и API Tests на пул-реквест. Тесты в пайплайне: 22 запроса, 42 проверки, 0 падений.
+
 
 ### Proxy в Kubernetes
 
@@ -410,6 +441,66 @@ cat .docker/config.json | base64
 
 #### Шаг 3
 Добавьте сюда скриншота вывода при вызове https://cinemaabyss.example.com/api/movies и  скриншот вывода event-service после вызова тестов.
+
+### Решение по Kubernetes
+
+Заполнены `proxy-service.yaml` и `events-service.yaml` - в каждом Deployment и Service. Доработан `ingress.yaml`, в `configmap.yaml` добавлены `EVENTS_SERVICE_URL` и `KAFKA_BROKERS`, во всех манифестах прописаны образы из своего registry.
+
+**Ingress.** Корневой путь отдан прокси, события идут в свой сервис напрямую:
+
+| Путь | Сервис | Порт |
+|---|---|---|
+| `/api/events` | events-service | 8082 |
+| `/` | proxy-service | 80 |
+
+Класс ingress задан полем `ingressClassName` вместо аннотации `kubernetes.io/ingress.class` из шаблона - аннотация считается устаревшей с версии Kubernetes 1.18.
+
+**startupProbe у events-service.** Сервис начинает отвечать только после подключения к Kafka, а брокеру нужно время на выбор лидера. Без отдельной пробы старта liveness убила бы под раньше, чем он успел подняться, поэтому на запуск выделено до 150 секунд, после чего работают обычные пробы:
+
+```yaml
+        startupProbe:
+          httpGet:
+            path: /api/events/health
+            port: 8082
+          periodSeconds: 5
+          failureThreshold: 30
+```
+
+**Доступ к образам.** Пакеты в GHCR опубликованы с публичным доступом, поэтому `dockerconfigsecret.yaml` содержит пустой набор учётных данных, а kubelet тянет образы анонимно. Причина в том, что base64 не является шифрованием: реальный токен в публичном репозитории был бы доступен всем, кто откроет файл. Ревьюеру при таком варианте тоже не нужен собственный токен. Инструкция по заполнению секрета для приватных пакетов оставлена комментарием в самом файле.
+
+**Запуск.** В `/etc/hosts` прописан адрес кластера, а не `127.0.0.1`:
+
+```
+192.168.49.2 cinemaabyss.example.com
+```
+
+При таком варианте `minikube tunnel` не нужен, ingress доступен напрямую. Вариант из задания с `127.0.0.1` и запущенным туннелем работает так же.
+
+**Результат.** Все семь подов в состоянии Running:
+
+```
+NAME                              READY   STATUS
+events-service-84d46565b7-kkq2v   1/1     Running
+kafka-0                           1/1     Running
+monolith-849b77bbdd-zwkrc         1/1     Running
+movies-service-7967dd9497-hd7sk   1/1     Running
+postgres-0                        1/1     Running
+proxy-service-6695cc5d8-fpxl9     1/1     Running
+zookeeper-0                       1/1     Running
+```
+
+При `MOVIES_MIGRATION_PERCENT: "100"` из configmap весь трафик каталога уходит в новый сервис, что видно по заголовку ответа:
+
+```bash
+curl -s -D - -o /dev/null http://cinemaabyss.example.com/api/movies | grep -i x-proxy-target
+# x-proxy-target: movies-service
+```
+
+Прогон `npm run test:kubernetes` дал 22 запроса, 42 проверки, 0 падений. Задание предупреждает, что часть проверок работоспособности упадёт, но здесь проходят все: прокси отвечает на `/health` сам, `/api/movies/health` направляет в movies-service, а `/api/events/*` в events-service, поэтому все адреса из окружения тестов обслуживаются.
+
+![Вывод api/movies через ingress](screenshots/task3-movies-via-ingress.png)
+
+![Логи events-service после прогона тестов](screenshots/task3-events-consumer-logs.png)
 
 
 ## Задание 4
