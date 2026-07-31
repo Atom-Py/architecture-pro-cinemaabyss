@@ -39,9 +39,8 @@ spec:
           requests:
             cpu: "100m"
             memory: "128Mi"
-        # The service answers only after it connects to Kafka, and the broker
-        # needs time to elect a leader. startupProbe gives it up to 150 seconds
-        # before the liveness probe starts killing the pod.
+        # The service answers only after it connects to Kafka, so it needs more
+        # time to start than the liveness probe would allow
         startupProbe:
           httpGet:
             path: /api/events/health

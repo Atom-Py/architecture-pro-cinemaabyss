@@ -577,6 +577,42 @@ minikube tunnel
 https://cinemaabyss.example.com/api/movies
 и приложите скриншот развертывания helm и вывода https://cinemaabyss.example.com/api/movies
 
+### Решение
+
+Заполнены шаблоны `templates/services/proxy-service.yaml` и `templates/services/events-service.yaml`. Все параметры вынесены в `values.yaml`, в шаблонах нет жёстко прописанных значений: образ и политика загрузки, число реплик, лимиты ресурсов, порты сервиса и контейнера берутся из значений. Смена версии образа или доли миграции делается через `helm upgrade`, без правки шаблонов.
+
+Пути образов в `values.yaml` заменены на свой registry, а в `imagePullSecrets.dockerconfigjson` подставлен base64 от `{"auths":{}}` по той же причине, что и в задании 3.
+
+**Исправления в чарте.** Три места, из-за которых чарт не заработал бы:
+
+- `templates/configmap.yaml` собирал `MOVIES_SERVICE_URL` как `http://movies:8081`, тогда как сервис в этом же чарте называется `movies-service`. Прокси не смог бы разрешить имя и весь трафик каталога отвечал бы ошибкой.
+- Там же отсутствовали `EVENTS_SERVICE_URL` и `KAFKA_BROKERS`. Без первой прокси не знает адрес сервиса событий, без второй events-service не находит брокера.
+- В `values.yaml` значение `imagePullSecrets.dockerconfigjson` было обрезано и при декодировании давало не JSON, а мусор.
+
+**Установка.**
+
+```bash
+kubectl delete namespace cinemaabyss
+helm install cinemaabyss src/kubernetes/helm --namespace cinemaabyss --create-namespace
+```
+
+Результат: релиз `cinemaabyss` в статусе deployed, ревизия 1, все семь подов Running, ingress получил адрес. Проверка тем же способом, что и в задании 3:
+
+```bash
+curl -s -D - -o /dev/null http://cinemaabyss.example.com/api/movies | grep -i x-proxy-target
+# x-proxy-target: movies-service
+```
+
+Прогон `npm run test:kubernetes` после установки чартом: 22 запроса, 42 проверки, 0 падений, то есть поведение совпадает с ручным развёртыванием.
+
+**Наблюдение по перезапускам.** У монолита и movies-service в первые минуты видно по два перезапуска с `dial tcp ...:5432: connect: connection refused`. Причина та же, что и в docker-compose: оба сервиса завершаются, если база ещё не готова. Разница в том, что в Kubernetes это лечится само - `restartPolicy: Always` поднимает контейнер, пока postgres не начнёт отвечать, и вмешательство не требуется. При необходимости жёсткого порядка запуска сюда добавляется init-контейнер, ожидающий базу.
+
+Чарт проверялся на Helm 4.2.2 и использует только конструкции, доступные и в Helm 3, поэтому устанавливается обеими версиями.
+
+![Установка чарта через Helm](screenshots/task4-helm-install.png)
+
+![Вывод api/movies после установки чартом](screenshots/task4-movies-via-ingress.png)
+
 
 # Задание 5
 Компания планирует активно развиваться и для повышения надежности, безопасности, реализации сетевых паттернов типа Circuit Breaker и канареечного деплоя вам как архитектору необходимо развернуть istio и настроить circuit breaker для monolith и movies сервисов.
