@@ -679,6 +679,60 @@ You can see 21 for the upstream_rq_pending_overflow value which means 21 calls s
 
 Приложите скриншот работы circuit breaker'а
 
+### Решение
+
+Конфигурация лежит в [src/kubernetes/circuit-breaker-config.yaml](src/kubernetes/circuit-breaker-config.yaml): два объекта `DestinationRule`, для `monolith` и для `movies-service`. Istio ставился версии 1.30.1, той же, что и локальный istioctl, чтобы не было расхождения между control plane и утилитой.
+
+**Что настроено.** Circuit breaker в Istio складывается из двух частей, и в правилах используются обе:
+
+```yaml
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 1
+        connectTimeout: 1s
+      http:
+        http1MaxPendingRequests: 1
+        http2MaxRequests: 1
+        maxRequestsPerConnection: 1
+    outlierDetection:
+      consecutive5xxErrors: 1
+      interval: 1s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 100
+```
+
+`connectionPool` ограничивает нагрузку: одно соединение и один запрос в очереди. Всё, что не влезло, немедленно получает 503, вместо того чтобы копиться в очереди и тянуть за собой рост задержек у всех клиентов. `outlierDetection` убирает неисправные экземпляры: после одной ошибки 5xx экземпляр исключается из балансировки на 30 секунд.
+
+Лимиты здесь намеренно занижены до единиц, чтобы срабатывание было видно на небольшой нагрузке. В реальной эксплуатации значения подбираются по профилю сервиса.
+
+**Инъекция sidecar.** После включения `istio-injection=enabled` перезапускались только Deployment четырёх сервисов. Postgres, Kafka и Zookeeper оставлены без sidecar сознательно: circuit breaker для них не нужен, а перехват TCP-трафика брокера прокси-контейнером требует отдельной настройки и к задаче не относится. Сервисы после перезапуска стали `2/2`, инфраструктурные statefulset-ы остались `1/1`.
+
+**Результат нагрузки.** Fortio, 50 параллельных соединений, 500 запросов:
+
+| Сервис | Code 200 | Code 503 |
+|---|---|---|
+| movies-service | 16 (3.2 %) | 484 (96.8 %) |
+| monolith | 7 (1.4 %) | 493 (98.6 %) |
+
+Статистика Envoy на стороне клиента подтверждает, что 503 приходят именно от circuit breaker, а не от самих сервисов:
+
+```
+cluster.outbound|8081||movies-service.cinemaabyss.svc.cluster.local;.upstream_rq_pending_overflow: 1072
+cluster.outbound|8081||movies-service.cinemaabyss.svc.cluster.local;.upstream_rq_active_overflow: 389
+cluster.outbound|8081||movies-service.cinemaabyss.svc.cluster.local;.upstream_cx_overflow: 69
+
+cluster.outbound|8080||monolith.cinemaabyss.svc.cluster.local;.upstream_rq_pending_overflow: 339
+cluster.outbound|8080||monolith.cinemaabyss.svc.cluster.local;.upstream_rq_active_overflow: 154
+cluster.outbound|8080||monolith.cinemaabyss.svc.cluster.local;.upstream_cx_overflow: 13
+```
+
+Счётчик `upstream_rq_pending_overflow` показывает запросы, отклонённые из-за переполнения очереди, `upstream_rq_active_overflow` - превышение лимита одновременных запросов. Значения накопительные и суммируются по всем прогонам: для монолита с одним прогоном 339 плюс 154 дают ровно 493 отклонённых запроса, а для movies-service после трёх прогонов 1072 плюс 389 дают 1461, то есть сумму 503 за все три раза.
+
+При обычной последовательной нагрузке приложение работает штатно - десять запросов подряд через ingress отдают 200. Circuit breaker срабатывает только когда параллельных запросов больше настроенного лимита, то есть отсекает именно перегрузку, а не нормальный трафик.
+
+![Работа circuit breaker](screenshots/task5-circuit-breaker.png)
+
 Удаляем все
 ```bash
 istioctl uninstall --purge
