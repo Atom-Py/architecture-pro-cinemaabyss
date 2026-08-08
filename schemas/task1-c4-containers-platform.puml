@@ -1,0 +1,63 @@
+@startuml task1-c4-containers-platform
+!include <C4/C4_Container>
+
+title Платформенный слой (C4, уровень 2) - Kubernetes, service mesh и наблюдаемость
+
+AddElementTag("mesh", $bgColor="#4527A0", $fontColor="#FFFFFF", $borderColor="#311B92", $legendText="Service mesh, Задание 5")
+
+Person(sre, "Дежурный инженер", "Следит за состоянием системы, разбирает инциденты.")
+
+System_Boundary(k8s, "Кластер Kubernetes") {
+
+    Container_Boundary(mesh, "Istio") {
+        Container(istio_gw, "Istio Ingress Gateway", "Envoy", "Единственная точка входа снаружи. Терминация TLS, канареечная маршрутизация по весам.", $tags="mesh")
+        Container(istiod, "istiod", "Istio control plane", "Раздаёт конфигурацию и сертификаты sidecar-ам, включает mTLS между сервисами.", $tags="mesh")
+        Container(sidecar, "Sidecar-прокси", "Envoy", "По одному контейнеру в каждом поде. Здесь работают circuit breaker для monolith и movies-service, повторы и таймауты.", $tags="mesh")
+    }
+
+    Container_Boundary(workloads, "Полезная нагрузка") {
+        Container(api_gw, "API Gateway (proxy-service)", "Python 3.14, Robyn", "Strangler Fig, переключение трафика фиче-флагом.")
+        Container(services, "Доменные сервисы", "Go, Python", "movies, users, payments, subscriptions, content, events. Каждый в своём Deployment с HPA.")
+        Container(monolith, "Монолит «Кинобездна»", "Go", "Deployment на переходный период.")
+    }
+
+    Container_Boundary(observability, "Наблюдаемость") {
+        Container(prometheus, "Prometheus", "Prometheus", "Собирает метрики с sidecar-ов и сервисов, считает долю ошибок и задержки.")
+        Container(grafana, "Grafana", "Grafana", "Дашборды по доменам, алерты на рост 5xx и срабатывание circuit breaker.")
+        Container(jaeger, "Jaeger", "Jaeger", "Распределённые трейсы: видно весь путь запроса от gateway до базы.")
+        Container(loki, "Loki", "Loki", "Централизованные логи всех подов.")
+    }
+
+    Container_Boundary(delivery, "Доставка") {
+        Container(helm, "Helm-чарт cinemaabyss", "Helm", "Единица развёртывания всей системы. Значения фиче-флагов вынесены в values.yaml.")
+    }
+}
+
+System_Ext(ghcr, "GitHub Container Registry", "Образы сервисов, собранные пайплайном.")
+System_Ext(actions, "GitHub Actions", "CI/CD: сборка образов, публикация в registry, прогон API-тестов.")
+
+Rel(actions, ghcr, "Публикует образы", "HTTPS")
+Rel(actions, helm, "Разворачивает релиз", "helm upgrade")
+Rel(helm, services, "Создаёт Deployment и Service", "Kubernetes API")
+Rel(helm, api_gw, "Создаёт Deployment, Service и ConfigMap", "Kubernetes API")
+Rel(helm, monolith, "Создаёт Deployment и Service", "Kubernetes API")
+Rel(ghcr, services, "Образы вытягиваются на узлы", "imagePullSecret")
+
+Rel(istio_gw, api_gw, "Проксирует внешний трафик", "HTTP, mTLS")
+Rel(istiod, sidecar, "Конфигурация и сертификаты", "xDS")
+Rel(istiod, istio_gw, "Конфигурация маршрутов", "xDS")
+Rel(sidecar, services, "Перехватывает весь входящий и исходящий трафик пода", "iptables")
+Rel(sidecar, monolith, "Перехватывает трафик пода", "iptables")
+
+Rel(sidecar, prometheus, "Отдаёт метрики трафика", "HTTP")
+Rel(sidecar, jaeger, "Отдаёт спаны", "OTLP")
+Rel(services, loki, "Пишут логи", "stdout")
+Rel(prometheus, grafana, "Источник данных", "HTTP")
+Rel(loki, grafana, "Источник данных", "HTTP")
+Rel(jaeger, grafana, "Источник данных", "HTTP")
+
+Rel(sre, grafana, "Смотрит дашборды и алерты", "HTTPS")
+Rel(sre, jaeger, "Разбирает медленные запросы", "HTTPS")
+
+SHOW_LEGEND()
+@enduml

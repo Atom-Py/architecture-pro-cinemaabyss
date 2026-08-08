@@ -154,3 +154,13 @@ go.work
 
 # Postman tests reports
 tests/postman/reports/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/

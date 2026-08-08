@@ -1,0 +1,117 @@
+@startuml task1-c4-containers-to-be
+!include <C4/C4_Container>
+
+title Диаграмма контейнеров (C4, уровень 2) - целевая экосистема «Кинобездна»
+
+AddElementTag("done", $bgColor="#2E7D32", $fontColor="#FFFFFF", $borderColor="#1B5E20", $legendText="Реализовано в этом спринте")
+AddElementTag("legacy", $bgColor="#B71C1C", $fontColor="#FFFFFF", $borderColor="#7F0000", $legendText="Монолит, выводится из эксплуатации")
+
+Person(viewer, "Пользователь", "Смотрит фильмы, ставит оценки, собирает избранное, платит за подписку.")
+
+System_Boundary(cinemaabyss, "Кинобездна") {
+
+    Container_Boundary(clients, "Клиентские приложения") {
+        Container(web_app, "Веб-приложение", "SPA, TypeScript", "Личный кабинет и каталог для браузера.")
+        Container(mobile_app, "Мобильное приложение", "Kotlin, Swift", "Каталог и просмотр на телефоне и планшете.")
+        Container(tv_app, "Приложение для смарт ТВ", "JavaScript, Tizen и webOS", "Упрощённый интерфейс под пульт и большой экран.")
+    }
+
+    Container_Boundary(edge, "Единая точка входа") {
+        Container(istio_gw, "Istio Ingress Gateway", "Envoy", "Терминация TLS, mTLS внутри кластера, канареечная маршрутизация, circuit breaker.")
+        Container(api_gw, "API Gateway (proxy-service)", "Python 3.14, Robyn", "Единая точка вызова сервисов. Strangler Fig: делит трафик между монолитом и микросервисами по фиче-флагу GRADUAL_MIGRATION и доле MOVIES_MIGRATION_PERCENT.", $tags="done")
+        Container(bff, "BFF", "Go", "Агрегация ответов под конкретный клиент. Три развёртывания - web, mobile, tv, каждое отдаёт своему устройству только нужный объём данных.")
+    }
+
+    Container_Boundary(domains, "Доменные сервисы") {
+        Container(movies, "Movies Service", "Go", "Метаданные фильмов: жанры, актёры, оценки, поиск по каталогу.", $tags="done")
+        ContainerDb(movies_db, "БД фильмов", "PostgreSQL", "Фильмы, жанры, актёры, рейтинги.")
+
+        Container(users, "Users Service", "Go", "Регистрация, аутентификация и выдача JWT, профили, папки с избранным.")
+        ContainerDb(users_db, "БД пользователей", "PostgreSQL", "Пользователи, сессии, избранное.")
+
+        Container(payments, "Payments Service", "Go", "Проведение платежей, возвраты, история операций.")
+        ContainerDb(payments_db, "БД платежей", "PostgreSQL", "Платежи, транзакции, статусы.")
+
+        Container(subscriptions, "Subscriptions Service", "Go", "Подписки, тарифы, скидки и промокоды, продление.")
+        ContainerDb(subscriptions_db, "БД подписок", "PostgreSQL", "Подписки, тарифы, скидки, состояние саг.")
+
+        Container(content, "Content Service", "Go", "Права на просмотр, выдача ссылок на видеопоток, синхронизация каталогов внешних кинотеатров.")
+        ContainerDb(content_db, "БД контента", "PostgreSQL", "Видео, источники, права доступа.")
+
+        Container(billing_saga, "Billing Saga Orchestrator", "Go", "Оркестрирует сагу «оплата - активация подписки». При отказе платежа выполняет компенсацию, состояние саг держит в схеме БД подписок.")
+    }
+
+    Container_Boundary(async, "Асинхронная интеграция") {
+        ContainerQueue(kafka, "Шина событий", "Apache Kafka", "Топики movie-events, user-events, payment-events.")
+        Container(events, "Events Service", "Python 3.14, Robyn, aiokafka", "MVP событийной модели: принимает события по REST, публикует в Kafka и сам же вычитывает их обратно.", $tags="done")
+        Container(notifications, "Notification Service", "Go", "Push и email по событиям: оплата прошла, подписка заканчивается, вышла новинка.")
+        Container(rec_adapter, "Recommendation Adapter", "Go", "Отдаёт события просмотров и оценок во внешнюю рекомендательную систему, забирает готовые подборки.")
+    }
+
+    ContainerDb(redis, "Кеш", "Redis", "Горячий каталог, результаты поиска, сессии.")
+
+    Container(monolith, "Монолит «Кинобездна»", "Go", "Всё, что ещё не вынесено в сервисы. По мере миграции доля его трафика падает до нуля.", $tags="legacy")
+    ContainerDb(monolith_db, "БД монолита", "PostgreSQL", "Единая схема: пользователи, фильмы, платежи, подписки.")
+}
+
+System_Ext(payment_ext, "Платёжные системы", "Списание оплаты, возвраты.")
+System_Ext(loyalty_ext, "Сервисы лояльности", "Бонусы и промокоды.")
+System_Ext(marketplace_ext, "Маркетплейсы", "Партнёрские продажи подписок.")
+System_Ext(cinemas_ext, "Онлайн-кинотеатры", "Внешние каталоги и видеопотоки.")
+System_Ext(recommender_ext, "Рекомендательная система", "Формирует персональные подборки.")
+System_Ext(storage_ext, "Объектное хранилище S3", "Постеры, трейлеры, субтитры.")
+System_Ext(cdn_ext, "CDN", "Раздача видео и статики.")
+
+Rel(viewer, web_app, "Работает в браузере", "HTTPS")
+Rel(viewer, mobile_app, "Работает с телефона", "HTTPS")
+Rel(viewer, tv_app, "Работает с телевизора", "HTTPS")
+
+Rel(web_app, istio_gw, "REST-запросы", "HTTPS, JSON")
+Rel(mobile_app, istio_gw, "REST-запросы", "HTTPS, JSON")
+Rel(tv_app, istio_gw, "REST-запросы", "HTTPS, JSON")
+
+Rel(istio_gw, api_gw, "Проксирует внешний трафик", "HTTP, mTLS")
+Rel(api_gw, bff, "Запросы, требующие агрегации", "REST")
+Rel(api_gw, movies, "Доля трафика /api/movies по фиче-флагу", "REST")
+Rel(api_gw, monolith, "Остаток трафика /api/movies и все ещё не вынесенные домены", "REST")
+Rel(api_gw, events, "Создание событий", "REST")
+
+Rel(bff, movies, "Каталог и метаданные", "REST")
+Rel(bff, users, "Профиль, избранное, проверка токена", "REST")
+Rel(bff, subscriptions, "Статус подписки и скидки", "REST")
+Rel(bff, payments, "История платежей", "REST")
+Rel(bff, content, "Ссылка на видеопоток", "REST")
+Rel(bff, rec_adapter, "Персональные подборки", "REST")
+
+Rel(movies, movies_db, "Чтение и запись", "SQL")
+Rel(users, users_db, "Чтение и запись", "SQL")
+Rel(payments, payments_db, "Чтение и запись", "SQL")
+Rel(subscriptions, subscriptions_db, "Чтение и запись", "SQL")
+Rel(content, content_db, "Чтение и запись", "SQL")
+Rel(monolith, monolith_db, "Чтение и запись", "SQL")
+
+Rel(movies, redis, "Кеширует каталог и поиск", "RESP")
+Rel(users, redis, "Хранит сессии", "RESP")
+
+Rel(movies, kafka, "Публикует movie-events", "Kafka")
+Rel(users, kafka, "Публикует user-events", "Kafka")
+Rel(payments, kafka, "Публикует payment-events", "Kafka")
+Rel(subscriptions, kafka, "Читает payment-events, публикует изменения подписки", "Kafka")
+Rel(monolith, kafka, "Публикует события ещё не вынесенных доменов", "Kafka")
+Rel(events, kafka, "Продюсер и консьюмер трёх топиков", "Kafka")
+Rel(notifications, kafka, "Читает события для уведомлений", "Kafka")
+Rel(rec_adapter, kafka, "Читает movie-events и user-events", "Kafka")
+Rel(billing_saga, kafka, "Управляет шагами саги через события", "Kafka")
+Rel(billing_saga, subscriptions_db, "Состояние саг", "SQL")
+
+Rel(payments, payment_ext, "Проводит платежи", "HTTPS, REST")
+Rel(subscriptions, loyalty_ext, "Применяет бонусы и промокоды", "HTTPS, REST")
+Rel(subscriptions, marketplace_ext, "Синхронизирует партнёрские подписки", "HTTPS, REST")
+Rel(movies, cinemas_ext, "Забирает метаданные каталогов", "HTTPS, REST")
+Rel(content, cinemas_ext, "Забирает ссылки на видеопотоки", "HTTPS, REST")
+Rel(content, storage_ext, "Читает и пишет медиафайлы", "S3 API")
+Rel(content, cdn_ext, "Публикует контент, инвалидирует кеш", "HTTPS")
+Rel(rec_adapter, recommender_ext, "Отдаёт события, забирает подборки", "HTTPS, REST")
+
+SHOW_LEGEND()
+@enduml
